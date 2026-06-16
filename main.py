@@ -51,10 +51,11 @@ from agent_sdk.manifests.models import CapabilityType
 CAPABILITY_ID = "llm.local"
 CAPABILITY_NAME = "LLM Local Connector"
 
-# Spark host on the local network. Fully overridable per request (``base_url``)
-# or via the ``CORAX_LLM_BASE_URL`` environment variable set during setup.
-DEFAULT_BASE_URL = "http://192.168.10.1:8000/v1"
-DEFAULT_MODEL = "qwen3.6"
+# Spark host on the local network (vLLM OpenAI-compatible server on the GB10).
+# Fully overridable per request (``base_url``) or via the ``CORAX_LLM_BASE_URL``
+# environment variable set during setup.
+DEFAULT_BASE_URL = "http://192.168.0.10:8000/v1"
+DEFAULT_MODEL = "google/gemma-4-12B-it"
 DEFAULT_LOCAL_API_KEY = "local"
 
 DEFAULT_TIMEOUT_SECONDS = 60.0

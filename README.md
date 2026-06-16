@@ -79,8 +79,8 @@ that supplies a disabled modality is refused with a `POLICY_DENIED` result.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `CORAX_LLM_BASE_URL` | `http://192.168.10.1:8000/v1` | Spark endpoint (set the real host/port at setup) |
-| `CORAX_LLM_MODEL` | `qwen3.6` | default model id |
+| `CORAX_LLM_BASE_URL` | `http://192.168.0.10:8000/v1` | Spark vLLM endpoint (GB10, OpenAI-compatible) |
+| `CORAX_LLM_MODEL` | `google/gemma-4-12B-it` | default served model (Gemma 4, vision-capable) |
 | `CORAX_LLM_API_KEY` | `local` | bearer token; never echoed back |
 
 Per-request `base_url` / `model` override the environment.

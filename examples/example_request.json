@@ -6,8 +6,8 @@
     "operation": "generate",
     "prompt": "Describe what is shown in this frame in one sentence.",
     "system": "You are a concise local vision assistant.",
-    "model": "qwen3.6",
-    "base_url": "http://192.168.10.1:8000/v1",
+    "model": "google/gemma-4-12B-it",
+    "base_url": "http://192.168.0.10:8000/v1",
     "temperature": 0.2,
     "max_tokens": 256,
     "images": [

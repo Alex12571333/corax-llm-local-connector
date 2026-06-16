@@ -291,7 +291,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(result.payload["text"], "via-text")
-        self.assertEqual(result.payload["model"], "qwen3.6")  # default model
+        self.assertEqual(result.payload["model"], "google/gemma-4-12B-it")  # default model
 
     async def test_localhost_endpoint_allowed(self) -> None:
         fake = MagicMock(return_value={"choices": []})
