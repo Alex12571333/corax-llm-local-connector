@@ -1,0 +1,18 @@
+{
+  "comment": "Multimodal generate request. 'images' is only accepted when image input was enabled during setup (the 'configure' operation / CORAX_LLM_ENABLE_IMAGE). Drop 'images' for a plain text prompt. References must be http(s) or data: URIs.",
+  "task_id": "task-demo-1",
+  "session_id": "session-demo-1",
+  "input": {
+    "operation": "generate",
+    "prompt": "Describe what is shown in this frame in one sentence.",
+    "system": "You are a concise local vision assistant.",
+    "model": "qwen3.6",
+    "base_url": "http://192.168.10.1:8000/v1",
+    "temperature": 0.2,
+    "max_tokens": 256,
+    "images": [
+      "https://example.local/frame.png",
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA="
+    ]
+  }
+}
