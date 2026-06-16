@@ -66,6 +66,27 @@ class _FakeResponse:
         return False
 
 
+class _FakeSSE:
+    """Stand-in for an urlopen() streaming response: a context manager that
+    yields raw SSE byte lines on iteration."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = lines
+
+    def __enter__(self):
+        return iter(self._lines)
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+async def _collect(agen) -> list[str]:
+    out: list[str] = []
+    async for piece in agen:
+        out.append(piece)
+    return out
+
+
 class ManifestTests(unittest.TestCase):
     def test_manifest_is_sdk_valid(self) -> None:
         manifest = CapabilityManifest.load(PROJECT_ROOT)
@@ -466,6 +487,103 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_health_check(self) -> None:
         status = await self.cap.health_check()
         self.assertEqual(status.value, "healthy")
+
+    # -- state_key echo (kernel/gateway round-trip) --------------------- #
+    async def test_state_key_echoes_payload(self) -> None:
+        result = await self.cap.execute(
+            request({"prompt": "hi", "mock_response": "yo", "state_key": "out"})
+        )
+        self.assertEqual(result.status, ResultStatus.SUCCESS)
+        self.assertEqual(result.state_patch, {"out": result.payload})
+
+    async def test_state_key_ignored_on_failure(self) -> None:
+        result = await self.cap.execute(request({"prompt": "", "state_key": "out"}))
+        self.assertEqual(result.status, ResultStatus.ERROR)
+        self.assertEqual(result.state_patch, {})
+
+    async def test_empty_state_key_no_patch(self) -> None:
+        result = await self.cap.execute(
+            request({"prompt": "hi", "mock_response": "yo", "state_key": ""})
+        )
+        self.assertEqual(result.state_patch, {})
+
+
+class StreamHelperTests(unittest.TestCase):
+    def test_chunk_text(self) -> None:
+        self.assertEqual(main._chunk_text("abcdef", size=2), ["ab", "cd", "ef"])
+        self.assertEqual(main._chunk_text(""), [""])
+
+    def test_sse_delta_variants(self) -> None:
+        self.assertIsNone(main._sse_delta("event: ping"))            # not a data line
+        self.assertIsNone(main._sse_delta("data: [DONE]"))           # end marker
+        self.assertIsNone(main._sse_delta("data:   "))               # empty payload
+        self.assertIsNone(main._sse_delta("data: {bad json"))        # invalid json
+        self.assertEqual(main._sse_delta('data: {"choices":[]}'), "")  # no choices
+        self.assertEqual(main._sse_delta('data: {"choices":["x"]}'), "")  # first not dict
+        self.assertEqual(main._sse_delta('data: {"choices":[{"delta":{}}]}'), "")  # no content
+        self.assertEqual(
+            main._sse_delta('data: {"choices":[{"delta":{"content":"hi"}}]}'), "hi"
+        )
+
+    def test_iter_sse_content(self) -> None:
+        lines = [
+            b'data: {"choices":[{"delta":{"content":"He"}}]}',
+            b"",  # blank line skipped
+            b'data: {"choices":[{"delta":{"content":"llo"}}]}',
+            b"data: [DONE]",
+        ]
+        self.assertEqual(list(main._iter_sse_content(iter(lines))), ["He", "llo"])
+
+
+class StreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        _scrub_env()
+        manifest = CapabilityManifest.load(PROJECT_ROOT)
+        self.cap = load_instance(manifest, PROJECT_ROOT, core_version="0.1.0")
+
+    async def asyncTearDown(self) -> None:
+        _scrub_env()
+
+    async def test_stream_mock(self) -> None:
+        chunks = await _collect(
+            self.cap.stream_generate(request({"prompt": "x", "mock_response": "hello world"}))
+        )
+        self.assertEqual("".join(chunks), "hello world")
+
+    async def test_stream_real_via_urlopen(self) -> None:
+        lines = [
+            b'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+            b'data: {"choices":[{"delta":{"content":"lo"}}]}',
+            b"data: [DONE]",
+        ]
+        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)):
+            chunks = await _collect(
+                self.cap.stream_generate(
+                    request({"prompt": "hi", "base_url": "http://192.168.0.5:8000/v1", "temperature": 0.1, "max_tokens": 32})
+                )
+            )
+        self.assertEqual("".join(chunks), "Hello")
+
+    async def test_stream_schema_error_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            await _collect(
+                self.cap.stream_generate(request({"prompt": "hi", "temperature": "hot"}))
+            )
+
+    async def test_stream_plan_error_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            await _collect(self.cap.stream_generate(request({"prompt": ""})))
+
+    async def test_stream_error_propagates(self) -> None:
+        with patch.object(
+            self.cap, "_post_chat_completion_stream", MagicMock(side_effect=RuntimeError("boom"))
+        ):
+            with self.assertRaises(RuntimeError):
+                await _collect(
+                    self.cap.stream_generate(
+                        request({"prompt": "hi", "base_url": "http://127.0.0.1:9/v1"})
+                    )
+                )
 
 
 if __name__ == "__main__":

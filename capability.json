@@ -66,6 +66,12 @@
       },
       "mock_response": {
         "type": "string"
+      },
+      "stream": {
+        "type": "boolean"
+      },
+      "state_key": {
+        "type": "string"
       }
     }
   },

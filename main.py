@@ -27,10 +27,11 @@ import asyncio
 import ipaddress
 import json
 import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, AsyncIterator, Iterator
 
 from agent_core import (
     Capability,
@@ -90,6 +91,8 @@ INPUT_SCHEMA = {
         "enable_video": {"type": "boolean"},
         "timeout_seconds": {"type": "number"},
         "mock_response": {"type": "string"},
+        "stream": {"type": "boolean"},
+        "state_key": {"type": "string"},
     },
 }
 
@@ -355,6 +358,49 @@ def _used_modalities(image_refs: list[str], video_refs: list[str]) -> list[str]:
     return used
 
 
+def _chunk_text(text: str, size: int = 24) -> list[str]:
+    """Split text into small pieces to simulate token streaming (mock/offline)."""
+    return [text[i : i + size] for i in range(0, len(text), size)] or [""]
+
+
+def _sse_delta(line: str) -> str | None:
+    """Extract the incremental content from one OpenAI-style SSE ``data:`` line.
+
+    Returns the delta text, ``""`` for a non-content data line, or ``None`` when
+    the line is not a data line or signals end-of-stream (``[DONE]``).
+    """
+    if not line.startswith("data:"):
+        return None
+    payload = line[len("data:"):].strip()
+    if not payload or payload == "[DONE]":
+        return None
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    choices = obj.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    delta = first.get("delta")
+    if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+        return delta["content"]
+    return ""
+
+
+def _iter_sse_content(response: Iterator[bytes]) -> Iterator[str]:
+    """Yield non-empty content deltas from an SSE byte-line stream."""
+    for raw in response:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            continue
+        delta = _sse_delta(line)
+        if delta:
+            yield delta
+
+
 def _extract_text(response: dict[str, Any]) -> str:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -408,14 +454,22 @@ class LLMLocalConnector(Capability):
 
             operation = data.get("operation", "generate")
             if operation == "generate":
-                return await self._generate(request, data)
-            if operation == "configure":
-                return self._configure(request, data)
-            if operation == "describe":
-                return self._describe(request)
-            if operation == "validate":
-                return self._validate(request, data)
-            raise ValueError(f"unsupported operation {operation!r}")
+                result = await self._generate(request, data)
+            elif operation == "configure":
+                result = self._configure(request, data)
+            elif operation == "describe":
+                result = self._describe(request)
+            elif operation == "validate":
+                result = self._validate(request, data)
+            else:
+                raise ValueError(f"unsupported operation {operation!r}")
+            # Optional: mirror the payload into the core session state so a
+            # kernel-driven caller (e.g. the agent gateway) can read it back via
+            # the StateManager. Off unless a non-empty ``state_key`` is given.
+            state_key = data.get("state_key")
+            if isinstance(state_key, str) and state_key and result.is_success:
+                result.state_patch = {state_key: result.payload}
+            return result
         except ValueError as exc:
             return _fail(request, ErrorCode.INVALID_INPUT, str(exc))
         except _SecurityError as exc:
@@ -593,6 +647,88 @@ class LLMLocalConnector(Capability):
         )
         with urllib.request.urlopen(http_request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    # -- streaming ------------------------------------------------------- #
+    async def stream_generate(self, request: CapabilityRequest) -> AsyncIterator[str]:
+        """Yield the model's reply incrementally as text deltas.
+
+        Used directly by a streaming caller (e.g. the agent gateway); the
+        single-shot ``execute`` contract returns the whole text instead. Input
+        and modalities are validated exactly like ``generate``. Raises (rather
+        than returning a Result) so the caller drives error handling.
+        """
+        data = request.input
+        errors = core_schema.validate(data, INPUT_SCHEMA)
+        if errors:
+            raise ValueError("; ".join(errors))
+        plan = self._plan(data)
+
+        mock_response = data.get("mock_response")
+        if isinstance(mock_response, str):
+            for piece in _chunk_text(mock_response):
+                yield piece
+            return
+
+        base_url = _resolve_base_url(data)
+        _ensure_local_endpoint(base_url)
+        timeout = _resolve_timeout(data)
+        payload: dict[str, Any] = {
+            "model": _resolve_model(data),
+            "messages": plan["messages"],
+            "stream": True,
+        }
+        if "temperature" in data:
+            payload["temperature"] = data["temperature"]
+        if "max_tokens" in data:
+            payload["max_tokens"] = data["max_tokens"]
+        api_key = os.getenv("CORAX_LLM_API_KEY") or DEFAULT_LOCAL_API_KEY
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        def worker() -> None:
+            try:
+                for piece in self._post_chat_completion_stream(
+                    base_url=base_url, api_key=api_key, payload=payload, timeout=timeout
+                ):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("data", piece))
+            except Exception as exc:  # noqa: BLE001 - surfaced to the awaiting caller
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            kind, value = await queue.get()
+            if kind == "data":
+                yield value
+            elif kind == "error":
+                raise value
+            else:
+                return
+
+    def _post_chat_completion_stream(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        payload: dict[str, Any],
+        timeout: float,
+    ) -> Iterator[str]:
+        endpoint = f"{base_url.rstrip('/')}/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+        http_request = urllib.request.Request(
+            endpoint,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+        )
+        with urllib.request.urlopen(http_request, timeout=timeout) as response:
+            yield from _iter_sse_content(response)
 
     async def health_check(self) -> HealthStatus:
         return HealthStatus.HEALTHY
