@@ -72,6 +72,15 @@
       },
       "state_key": {
         "type": "string"
+      },
+      "tools": {
+        "type": "array"
+      },
+      "tool_choice": {
+        "type": "string"
+      },
+      "mock_tool_calls": {
+        "type": "array"
       }
     }
   },
@@ -110,7 +119,11 @@
       },
       "env_assignments": {
         "type": "object"
-      }
+      },
+      "tool_calls": {
+        "type": "array"
+      },
+      "finish_reason": {}
     },
     "required": [
       "operation"

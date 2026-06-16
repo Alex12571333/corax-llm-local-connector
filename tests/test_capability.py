@@ -488,6 +488,48 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         status = await self.cap.health_check()
         self.assertEqual(status.value, "healthy")
 
+    # -- tool calling --------------------------------------------------- #
+    async def test_generate_mock_with_tool_calls(self) -> None:
+        tcs = [{"id": "c1", "type": "function", "function": {"name": "list_files", "arguments": "{}"}}]
+        result = await self.cap.execute(
+            request({"prompt": "list", "mock_response": "", "mock_tool_calls": tcs})
+        )
+        self.assertEqual(result.status, ResultStatus.SUCCESS)
+        self.assertEqual(result.payload["tool_calls"], tcs)
+        self.assertEqual(result.payload["finish_reason"], "tool_calls")
+
+    async def test_generate_mock_without_tools_finish_stop(self) -> None:
+        result = await self.cap.execute(request({"prompt": "hi", "mock_response": "yo"}))
+        self.assertEqual(result.payload["tool_calls"], [])
+        self.assertEqual(result.payload["finish_reason"], "stop")
+
+    async def test_generate_real_returns_tool_calls(self) -> None:
+        os.environ["CORAX_LLM_API_KEY"] = "T"
+        tc = {"id": "c1", "type": "function", "function": {"name": "list_files", "arguments": "{\"path\":\".\"}"}}
+        raw = {"model": "gemma", "choices": [{"message": {"content": None, "tool_calls": [tc]}, "finish_reason": "tool_calls"}]}
+        captured = {}
+
+        def fake(*, base_url, api_key, payload, timeout):
+            captured["payload"] = payload
+            return raw
+
+        with patch.object(self.cap, "_post_chat_completion", fake):
+            result = await self.cap.execute(
+                request(
+                    {
+                        "prompt": "list files",
+                        "base_url": "http://127.0.0.1:9/v1",
+                        "tools": [{"type": "function", "function": {"name": "list_files"}}],
+                        "tool_choice": "auto",
+                    }
+                )
+            )
+        self.assertEqual(result.payload["tool_calls"], [tc])
+        self.assertEqual(result.payload["finish_reason"], "tool_calls")
+        self.assertEqual(result.payload["text"], "")  # content was null
+        self.assertIn("tools", captured["payload"])
+        self.assertEqual(captured["payload"]["tool_choice"], "auto")
+
     # -- state_key echo (kernel/gateway round-trip) --------------------- #
     async def test_state_key_echoes_payload(self) -> None:
         result = await self.cap.execute(
@@ -524,6 +566,21 @@ class StreamHelperTests(unittest.TestCase):
         self.assertEqual(
             main._sse_delta('data: {"choices":[{"delta":{"content":"hi"}}]}'), "hi"
         )
+
+    def test_extract_tool_calls_variants(self) -> None:
+        self.assertEqual(main._extract_tool_calls({}), [])
+        self.assertEqual(main._extract_tool_calls({"choices": []}), [])
+        self.assertEqual(main._extract_tool_calls({"choices": ["x"]}), [])
+        self.assertEqual(main._extract_tool_calls({"choices": [{"message": {}}]}), [])
+        tcs = [{"id": "1"}]
+        self.assertEqual(
+            main._extract_tool_calls({"choices": [{"message": {"tool_calls": tcs}}]}), tcs
+        )
+
+    def test_finish_reason_variants(self) -> None:
+        self.assertIsNone(main._finish_reason({}))
+        self.assertIsNone(main._finish_reason({"choices": [{}]}))
+        self.assertEqual(main._finish_reason({"choices": [{"finish_reason": "stop"}]}), "stop")
 
     def test_iter_sse_content(self) -> None:
         lines = [

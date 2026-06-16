@@ -93,6 +93,9 @@ INPUT_SCHEMA = {
         "mock_response": {"type": "string"},
         "stream": {"type": "boolean"},
         "state_key": {"type": "string"},
+        "tools": {"type": "array"},
+        "tool_choice": {"type": "string"},
+        "mock_tool_calls": {"type": "array"},
     },
 }
 
@@ -110,6 +113,8 @@ OUTPUT_SCHEMA = {
         "used_modalities": {"type": "array"},
         "setup_menu": {"type": "object"},
         "env_assignments": {"type": "object"},
+        "tool_calls": {"type": "array"},
+        "finish_reason": {},
     },
     "required": ["operation"],
 }
@@ -417,6 +422,28 @@ def _extract_text(response: dict[str, Any]) -> str:
     return text[:MAX_OUTPUT_CHARS] if isinstance(text, str) else ""
 
 
+def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return []
+    first = choices[0]
+    if not isinstance(first, dict):
+        return []
+    message = first.get("message")
+    if isinstance(message, dict) and isinstance(message.get("tool_calls"), list):
+        return message["tool_calls"]
+    return []
+
+
+def _finish_reason(response: dict[str, Any]) -> str | None:
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        reason = choices[0].get("finish_reason")
+        if isinstance(reason, str):
+            return reason
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Capability
 # --------------------------------------------------------------------------- #
@@ -511,6 +538,7 @@ class LLMLocalConnector(Capability):
 
         mock_response = data.get("mock_response")
         if isinstance(mock_response, str):
+            mock_tool_calls = data.get("mock_tool_calls") or []
             return _ok(
                 request,
                 {
@@ -520,6 +548,8 @@ class LLMLocalConnector(Capability):
                     "endpoint": "mock",
                     "enabled_modalities": _ordered(plan["enabled"]),
                     "used_modalities": used,
+                    "tool_calls": mock_tool_calls,
+                    "finish_reason": "tool_calls" if mock_tool_calls else "stop",
                     "raw": {"choices": [{"message": {"content": mock_response}}]},
                 },
             )
@@ -533,6 +563,10 @@ class LLMLocalConnector(Capability):
             payload["temperature"] = data["temperature"]
         if "max_tokens" in data:
             payload["max_tokens"] = data["max_tokens"]
+        if "tools" in data:
+            payload["tools"] = data["tools"]
+        if "tool_choice" in data:
+            payload["tool_choice"] = data["tool_choice"]
 
         api_key = os.getenv("CORAX_LLM_API_KEY") or DEFAULT_LOCAL_API_KEY
 
@@ -577,6 +611,8 @@ class LLMLocalConnector(Capability):
                 "endpoint": base_url,
                 "enabled_modalities": _ordered(plan["enabled"]),
                 "used_modalities": used,
+                "tool_calls": _extract_tool_calls(raw),
+                "finish_reason": _finish_reason(raw),
                 "raw": raw,
             },
         )
