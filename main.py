@@ -395,6 +395,37 @@ def _sse_delta(line: str) -> str | None:
     return ""
 
 
+def _sse_event(line: str) -> dict[str, Any] | None:
+    """Parse one OpenAI-style SSE line into a compact streaming event."""
+    if not line.startswith("data:"):
+        return None
+    payload = line[len("data:"):].strip()
+    if not payload:
+        return None
+    if payload == "[DONE]":
+        return {"type": "done"}
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    choices = obj.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    delta = first.get("delta") if isinstance(first.get("delta"), dict) else {}
+    event: dict[str, Any] = {"type": "delta"}
+    if isinstance(delta.get("content"), str):
+        event["content"] = delta["content"]
+    if isinstance(delta.get("tool_calls"), list):
+        event["tool_calls"] = delta["tool_calls"]
+    finish_reason = first.get("finish_reason")
+    if isinstance(finish_reason, str):
+        event["finish_reason"] = finish_reason
+    return event
+
+
 def _iter_sse_content(response: Iterator[bytes]) -> Iterator[str]:
     """Yield non-empty content deltas from an SSE byte-line stream."""
     for raw in response:
@@ -404,6 +435,39 @@ def _iter_sse_content(response: Iterator[bytes]) -> Iterator[str]:
         delta = _sse_delta(line)
         if delta:
             yield delta
+
+
+def _iter_sse_events(response: Iterator[bytes]) -> Iterator[dict[str, Any]]:
+    """Yield compact delta/done events from an SSE byte-line stream."""
+    for raw in response:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            continue
+        event = _sse_event(line)
+        if event is not None:
+            yield event
+
+
+def _merge_tool_call_delta(calls: list[dict[str, Any]], delta: dict[str, Any]) -> None:
+    index = delta.get("index")
+    if not isinstance(index, int):
+        index = len(calls)
+    while len(calls) <= index:
+        calls.append({"function": {"arguments": ""}})
+    target = calls[index]
+    if isinstance(delta.get("id"), str):
+        target["id"] = delta["id"]
+    if isinstance(delta.get("type"), str):
+        target["type"] = delta["type"]
+    function = delta.get("function")
+    if isinstance(function, dict):
+        target_function = target.setdefault("function", {})
+        if isinstance(function.get("name"), str):
+            target_function["name"] = function["name"]
+        if isinstance(function.get("arguments"), str):
+            target_function["arguments"] = (
+                str(target_function.get("arguments") or "") + function["arguments"]
+            )
 
 
 def _extract_text(response: dict[str, Any]) -> str:
@@ -743,6 +807,85 @@ class LLMLocalConnector(Capability):
             else:
                 return
 
+    async def stream_generate_events(self, request: CapabilityRequest) -> AsyncIterator[dict[str, Any]]:
+        """Yield streaming text deltas and final tool calls from one LLM request."""
+        data = request.input
+        errors = core_schema.validate(data, INPUT_SCHEMA)
+        if errors:
+            raise ValueError("; ".join(errors))
+        plan = self._plan(data)
+
+        mock_response = data.get("mock_response")
+        if isinstance(mock_response, str):
+            for piece in _chunk_text(mock_response):
+                yield {"type": "delta", "content": piece}
+            mock_tool_calls = data.get("mock_tool_calls")
+            yield {
+                "type": "done",
+                "tool_calls": mock_tool_calls if isinstance(mock_tool_calls, list) else [],
+                "finish_reason": "tool_calls" if mock_tool_calls else "stop",
+            }
+            return
+
+        base_url = _resolve_base_url(data)
+        _ensure_local_endpoint(base_url)
+        timeout = _resolve_timeout(data)
+        payload: dict[str, Any] = {
+            "model": _resolve_model(data),
+            "messages": plan["messages"],
+            "stream": True,
+        }
+        if "temperature" in data:
+            payload["temperature"] = data["temperature"]
+        if "max_tokens" in data:
+            payload["max_tokens"] = data["max_tokens"]
+        if "tools" in data:
+            payload["tools"] = data["tools"]
+        if "tool_choice" in data:
+            payload["tool_choice"] = data["tool_choice"]
+        api_key = os.getenv("CORAX_LLM_API_KEY") or DEFAULT_LOCAL_API_KEY
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        def worker() -> None:
+            try:
+                for event in self._post_chat_completion_stream_events(
+                    base_url=base_url, api_key=api_key, payload=payload, timeout=timeout
+                ):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("data", event))
+            except Exception as exc:  # noqa: BLE001 - surfaced to the awaiting caller
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+        tool_calls: list[dict[str, Any]] = []
+        finish_reason: str | None = None
+        while True:
+            kind, value = await queue.get()
+            if kind == "error":
+                raise value
+            if kind == "done":
+                yield {
+                    "type": "done",
+                    "tool_calls": tool_calls,
+                    "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
+                }
+                return
+
+            event = value
+            if not isinstance(event, dict):
+                continue
+            if isinstance(event.get("finish_reason"), str):
+                finish_reason = event["finish_reason"]
+            for tool_delta in event.get("tool_calls") or []:
+                if isinstance(tool_delta, dict):
+                    _merge_tool_call_delta(tool_calls, tool_delta)
+            content = event.get("content")
+            if isinstance(content, str) and content:
+                yield {"type": "delta", "content": content}
+
     def _post_chat_completion_stream(
         self,
         *,
@@ -765,6 +908,29 @@ class LLMLocalConnector(Capability):
         )
         with urllib.request.urlopen(http_request, timeout=timeout) as response:
             yield from _iter_sse_content(response)
+
+    def _post_chat_completion_stream_events(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        payload: dict[str, Any],
+        timeout: float,
+    ) -> Iterator[dict[str, Any]]:
+        endpoint = f"{base_url.rstrip('/')}/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+        http_request = urllib.request.Request(
+            endpoint,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+        )
+        with urllib.request.urlopen(http_request, timeout=timeout) as response:
+            yield from _iter_sse_events(response)
 
     async def health_check(self) -> HealthStatus:
         return HealthStatus.HEALTHY

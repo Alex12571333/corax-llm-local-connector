@@ -591,6 +591,16 @@ class StreamHelperTests(unittest.TestCase):
         ]
         self.assertEqual(list(main._iter_sse_content(iter(lines))), ["He", "llo"])
 
+    def test_iter_sse_events_with_tool_call_deltas(self) -> None:
+        lines = [
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"filesystem","arguments":"{\\"operation\\":"}}]}}]}',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"read\\"}"}}]},"finish_reason":"tool_calls"}]}',
+            b"data: [DONE]",
+        ]
+        events = list(main._iter_sse_events(iter(lines)))
+        self.assertEqual(events[0]["tool_calls"][0]["function"]["name"], "filesystem")
+        self.assertEqual(events[1]["finish_reason"], "tool_calls")
+
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -620,6 +630,29 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         self.assertEqual("".join(chunks), "Hello")
+
+    async def test_stream_events_real_with_tool_calls(self) -> None:
+        lines = [
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"filesystem","arguments":"{\\"path\\":"}}]}}]}',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"notes.txt\\"}"}}]},"finish_reason":"tool_calls"}]}',
+            b"data: [DONE]",
+        ]
+        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)):
+            events = await _collect(
+                self.cap.stream_generate_events(
+                    request({
+                        "messages": [{"role": "user", "content": "read notes"}],
+                        "tools": [{"type": "function", "function": {"name": "filesystem", "parameters": {}}}],
+                        "tool_choice": "auto",
+                        "base_url": "http://192.168.0.5:8000/v1",
+                    })
+                )
+            )
+        done = events[-1]
+        self.assertEqual(done["finish_reason"], "tool_calls")
+        self.assertEqual(done["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(done["tool_calls"][0]["function"]["name"], "filesystem")
+        self.assertEqual(done["tool_calls"][0]["function"]["arguments"], '{"path":"notes.txt"}')
 
     async def test_stream_schema_error_raises(self) -> None:
         with self.assertRaises(ValueError):
