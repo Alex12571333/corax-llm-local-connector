@@ -10,15 +10,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import urllib.error
 
 from agent_core import (
-    Capability,
     CapabilityRequest,
     ErrorCode,
+    ModelProvider,
     PermissionLevel,
     ResultStatus,
     RiskLevel,
     SideEffect,
 )
-from agent_sdk import CapabilityManifest, load_instance, validate_manifest
+from agent_sdk import (
+    ExtensionManifest,
+    load_extension_instance,
+    validate_extension_manifest,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,8 +93,8 @@ async def _collect(agen) -> list[str]:
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_is_sdk_valid(self) -> None:
-        manifest = CapabilityManifest.load(PROJECT_ROOT)
-        result = validate_manifest(manifest, core_version="0.1.0")
+        manifest = ExtensionManifest.load(PROJECT_ROOT)
+        result = validate_extension_manifest(manifest, core_version="0.2.0")
 
         self.assertTrue(result.ok, result.errors)
         self.assertEqual(result.warnings, [])
@@ -98,40 +102,56 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest.name, "LLM Local Connector")
         self.assertEqual(manifest.permission_level, PermissionLevel.CONFIRM)
         self.assertEqual(manifest.risk_level, RiskLevel.MEDIUM)
-        self.assertEqual(manifest.side_effects, (SideEffect.NETWORK_REQUEST,))
-        self.assertEqual(manifest.entrypoint, "main:LLMLocalConnector")
-        self.assertEqual(manifest.capability_type.value, "connector")
+        self.assertEqual(
+            manifest.side_effects,
+            (SideEffect.NETWORK_REQUEST, SideEffect.MODEL_INFERENCE),
+        )
+        self.assertEqual(manifest.entrypoint, "main:LocalModelProvider")
+        self.assertEqual(manifest.kind.value, "model_provider")
 
     def test_manifest_json_identity(self) -> None:
-        data = json.loads((PROJECT_ROOT / "capability.json").read_text())
+        data = json.loads((PROJECT_ROOT / "extension.json").read_text())
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
         self.assertEqual(data["version"], "1.0.0")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
-        self.assertEqual(data["capability_type"], "connector")
-        self.assertEqual(data["min_core_version"], "0.1.0")
-        self.assertEqual(data["sdk_version"], "0.1.0")
-        self.assertNotIn("required_scopes", data)
+        self.assertEqual(data["kind"], "model_provider")
+        self.assertEqual(data["compatibility"]["min_core_version"], "0.2.0")
+        self.assertEqual(data["compatibility"]["sdk_version"], "0.2.0")
+        self.assertEqual(
+            data["security"]["required_scopes"],
+            ["model.inference", "network.private"],
+        )
 
 
 class LoaderTests(unittest.TestCase):
     def test_capability_loads_through_sdk_loader(self) -> None:
-        manifest = CapabilityManifest.load(PROJECT_ROOT)
-        cap = load_instance(manifest, PROJECT_ROOT, core_version="0.1.0")
+        manifest = ExtensionManifest.load(PROJECT_ROOT)
+        cap = load_extension_instance(
+            manifest, PROJECT_ROOT, core_version="0.2.0"
+        )
 
-        self.assertIsInstance(cap, Capability)
+        self.assertIsInstance(cap, ModelProvider)
         self.assertEqual(cap.id, "llm.local")
-        self.assertEqual(cap.required_scopes, set())
-        self.assertEqual(cap.side_effects, {SideEffect.NETWORK_REQUEST})
+        self.assertEqual(
+            cap.required_scopes,
+            {"model.inference", "network.private"},
+        )
+        self.assertEqual(
+            cap.side_effects,
+            {SideEffect.NETWORK_REQUEST, SideEffect.MODEL_INFERENCE},
+        )
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _scrub_env()
-        manifest = CapabilityManifest.load(PROJECT_ROOT)
-        self.cap = load_instance(manifest, PROJECT_ROOT, core_version="0.1.0")
+        manifest = ExtensionManifest.load(PROJECT_ROOT)
+        self.cap = load_extension_instance(
+            manifest, PROJECT_ROOT, core_version="0.2.0"
+        )
 
     async def asyncTearDown(self) -> None:
         _scrub_env()
@@ -605,8 +625,10 @@ class StreamHelperTests(unittest.TestCase):
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _scrub_env()
-        manifest = CapabilityManifest.load(PROJECT_ROOT)
-        self.cap = load_instance(manifest, PROJECT_ROOT, core_version="0.1.0")
+        manifest = ExtensionManifest.load(PROJECT_ROOT)
+        self.cap = load_extension_instance(
+            manifest, PROJECT_ROOT, core_version="0.2.0"
+        )
 
     async def asyncTearDown(self) -> None:
         _scrub_env()

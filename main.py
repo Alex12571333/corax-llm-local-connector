@@ -6,7 +6,7 @@ network) through an OpenAI-compatible ``/chat/completions`` endpoint.
 
 Two things make it useful inside Corax without ever touching the agent's code:
 
-* It implements the public ``agent_core.Capability`` contract and carries an
+* It implements the public ``agent_core.ModelProvider`` contract and carries an
   ``agent_sdk`` manifest, so the SDK loader can install and run it as-is.
 * It is *multimodal-aware*. Which input modalities (text, image, video) the
   local model accepts is a setup choice. The choice is read from environment
@@ -34,11 +34,12 @@ import urllib.request
 from typing import Any, AsyncIterator, Iterator
 
 from agent_core import (
-    Capability,
     CapabilityRequest,
     CoreError,
     ErrorCode,
     HealthStatus,
+    ModelProvider,
+    ModelRequest,
     PermissionLevel,
     Result,
     ResultStatus,
@@ -46,8 +47,7 @@ from agent_core import (
     SideEffect,
 )
 from agent_core import schema as core_schema
-from agent_sdk import capability
-from agent_sdk.manifests.models import CapabilityType
+from agent_sdk import model_provider
 
 CAPABILITY_ID = "llm.local"
 CAPABILITY_NAME = "LLM Local Connector"
@@ -511,7 +511,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
 # --------------------------------------------------------------------------- #
 # Capability
 # --------------------------------------------------------------------------- #
-@capability(
+@model_provider(
     id=CAPABILITY_ID,
     name=CAPABILITY_NAME,
     description=(
@@ -522,19 +522,23 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
     version="1.0.0",
     author="Corax",
     license="MIT",
-    tags=["llm", "local", "connector", "spark", "multimodal", "vision"],
+    tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
     permission_level=PermissionLevel.CONFIRM,
+    required_scopes=["network.private", "model.inference"],
     risk_level=RiskLevel.MEDIUM,
-    side_effects=[SideEffect.NETWORK_REQUEST],
+    side_effects=[SideEffect.NETWORK_REQUEST, SideEffect.MODEL_INFERENCE],
+    secrets=["CORAX_LLM_API_KEY"],
     input_schema=INPUT_SCHEMA,
     output_schema=OUTPUT_SCHEMA,
-    entrypoint="main:LLMLocalConnector",
-    capability_type=CapabilityType.CONNECTOR,
-    min_core_version="0.1.0",
-    sdk_version="0.1.0",
+    entrypoint="main:LocalModelProvider",
+    min_core_version="0.2.0",
 )
-class LLMLocalConnector(Capability):
+class LocalModelProvider(ModelProvider):
     """Call a local Spark LLM and manage its input-modality setup."""
+
+    async def generate(self, request: ModelRequest) -> Result:
+        """Generate through the model-provider contract."""
+        return await self.execute(_model_capability_request(request))
 
     async def execute(self, request: CapabilityRequest) -> Result:
         try:
@@ -749,7 +753,10 @@ class LLMLocalConnector(Capability):
             return json.loads(response.read().decode("utf-8"))
 
     # -- streaming ------------------------------------------------------- #
-    async def stream_generate(self, request: CapabilityRequest) -> AsyncIterator[str]:
+    async def stream_generate(
+        self,
+        request: ModelRequest | CapabilityRequest,
+    ) -> AsyncIterator[str]:
         """Yield the model's reply incrementally as text deltas.
 
         Used directly by a streaming caller (e.g. the agent gateway); the
@@ -757,6 +764,7 @@ class LLMLocalConnector(Capability):
         and modalities are validated exactly like ``generate``. Raises (rather
         than returning a Result) so the caller drives error handling.
         """
+        request = _model_capability_request(request)
         data = request.input
         errors = core_schema.validate(data, INPUT_SCHEMA)
         if errors:
@@ -807,8 +815,12 @@ class LLMLocalConnector(Capability):
             else:
                 return
 
-    async def stream_generate_events(self, request: CapabilityRequest) -> AsyncIterator[dict[str, Any]]:
+    async def stream_generate_events(
+        self,
+        request: ModelRequest | CapabilityRequest,
+    ) -> AsyncIterator[dict[str, Any]]:
         """Yield streaming text deltas and final tool calls from one LLM request."""
+        request = _model_capability_request(request)
         data = request.input
         errors = core_schema.validate(data, INPUT_SCHEMA)
         if errors:
@@ -934,3 +946,31 @@ class LLMLocalConnector(Capability):
 
     async def health_check(self) -> HealthStatus:
         return HealthStatus.HEALTHY
+
+
+def _model_capability_request(
+    request: ModelRequest | CapabilityRequest,
+) -> CapabilityRequest:
+    """Translate the role request for the legacy internal operation pipeline."""
+    if isinstance(request, CapabilityRequest):
+        return request
+    data = dict(request.parameters)
+    data["operation"] = "generate"
+    if request.prompt:
+        data["prompt"] = request.prompt
+    if request.messages:
+        data["messages"] = list(request.messages)
+    if request.model:
+        data["model"] = request.model
+    if request.modalities:
+        data["modalities"] = list(request.modalities)
+    return CapabilityRequest(
+        task_id=f"model-{id(request)}",
+        session_id=request.session_id,
+        input=data,
+        metadata=dict(request.metadata),
+    )
+
+
+# Import compatibility for 0.1 callers. The canonical entrypoint is above.
+LLMLocalConnector = LocalModelProvider

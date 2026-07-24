@@ -1,22 +1,23 @@
 # Corax LLM Local Connector
 
-A standalone [Corax](https://github.com/Alex12571333/corax-agent) capability that
+A standalone [Corax](https://github.com/Alex12571333/corax-agent)
+`model_provider` extension that
 connects the agent to a **local LLM running on the Spark device** (e.g. a DGX
 Spark on the `192.168.10.0/24` network) through an OpenAI-compatible
 `/chat/completions` endpoint — with **text plus optional image / video input**,
 selectable during primary or secondary agent setup.
 
-It is a pure capability package. It does not modify, vendor, or depend on the
+It is a pure extension package. It does not modify, vendor, or depend on the
 internals of `corax-core`, `corax-sdk`, or `corax-agent`; it only uses their
-public contracts (`agent_core.Capability` / `Result`, the `agent_sdk` manifest +
-loader). The agent can install it without any code change — just point a
-`capabilities.available` entry at this directory.
+public contracts (`agent_core.ModelProvider` / `ModelRequest`, the `agent_sdk`
+manifest + loader). The agent can install it without any code change — just
+point an `extensions.available` entry at this directory.
 
 | | |
 |---|---|
 | id | `llm.local` |
-| entrypoint | `main:LLMLocalConnector` |
-| type | `connector` |
+| entrypoint | `main:LocalModelProvider` |
+| kind | `model_provider` |
 | permission level | `confirm` |
 | risk level | `medium` |
 | side effects | `network_request` |
@@ -103,17 +104,20 @@ Drop this package next to the other capability packages and add it to the
 agent's config:
 
 ```yaml
-capabilities:
-  enabled: [echo, filesystem, editor, shell, llm.local]
+extensions:
+  active:
+    model_provider: [llm.local]
+  bindings:
+    primary_model: llm.local
   available:
     llm.local:
       enabled: true
-      type: connector
-      description: Local Spark LLM connector
+      kind: model_provider
+      description: Local Spark model provider
       path: ../corax-llm-local-connector
 ```
 
-The agent's `CapabilityLoader` loads it by manifest + entrypoint via the SDK.
+The agent's `ExtensionLoader` loads it by manifest + entrypoint via the SDK.
 
 ## Tests
 
