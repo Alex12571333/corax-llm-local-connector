@@ -16,6 +16,9 @@ dependencies = [
   "agent-sdk @ git+https://github.com/Alex12571333/agent-sdk.git"
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 include = [
   "extension.json",
