@@ -16,7 +16,7 @@ point an `extensions.available` entry at this directory.
 | | |
 |---|---|
 | id | `llm.local` |
-| version | `1.1.0` |
+| version | `1.1.1` |
 | entrypoint | `main:LocalModelProvider` |
 | kind | `model_provider` |
 | permission level | `confirm` |
@@ -51,6 +51,7 @@ emits events in provider order:
 ```jsonc
 {"type": "reasoning", "content": "I should inspect the available tools..."}
 {"type": "delta", "content": "Here is the result"}
+{"type": "context", "used": 1234, "unit": "tokens"}
 {"type": "done", "tool_calls": [], "finish_reason": "stop"}
 ```
 
@@ -59,7 +60,10 @@ OpenAI-compatible servers use both `delta.reasoning` and
 to the same `reasoning` event. Answer text remains a `delta` event. Incremental
 tool-call fragments are assembled and returned on the terminal `done` event,
 so the runtime can preserve correct tool IDs and arguments without mixing them
-into visible model text.
+into visible model text. The connector requests OpenAI-compatible streaming
+usage and emits exact `prompt_tokens` as a context event. Servers that reject
+`stream_options` with HTTP 400/422 are retried once without that optional
+field, preserving streaming compatibility.
 
 ### `describe`
 Read-only. Returns the supported and currently-enabled modalities plus a

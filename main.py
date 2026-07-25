@@ -408,6 +408,10 @@ def _sse_event(line: str) -> dict[str, Any] | None:
         obj = json.loads(payload)
     except json.JSONDecodeError:
         return None
+    usage = obj.get("usage")
+    prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    if type(prompt_tokens) is int and prompt_tokens >= 0:
+        return {"type": "context", "used": prompt_tokens, "unit": "tokens"}
     choices = obj.get("choices")
     if not isinstance(choices, list) or not choices:
         return None
@@ -524,7 +528,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.1.0",
+    version="1.1.1",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
@@ -851,6 +855,7 @@ class LocalModelProvider(ModelProvider):
             "model": _resolve_model(data),
             "messages": plan["messages"],
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
@@ -893,6 +898,9 @@ class LocalModelProvider(ModelProvider):
 
             event = value
             if not isinstance(event, dict):
+                continue
+            if event.get("type") == "context":
+                yield event
                 continue
             if isinstance(event.get("finish_reason"), str):
                 finish_reason = event["finish_reason"]
@@ -938,19 +946,31 @@ class LocalModelProvider(ModelProvider):
         timeout: float,
     ) -> Iterator[dict[str, Any]]:
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
-        body = json.dumps(payload).encode("utf-8")
-        http_request = urllib.request.Request(
-            endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-        )
-        with urllib.request.urlopen(http_request, timeout=timeout) as response:
-            yield from _iter_sse_events(response)
+        fallback = dict(payload)
+        fallback.pop("stream_options", None)
+        attempts = (payload, fallback) if fallback != payload else (payload,)
+        for index, attempt in enumerate(attempts):
+            body = json.dumps(attempt).encode("utf-8")
+            http_request = urllib.request.Request(
+                endpoint,
+                data=body,
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+            )
+            try:
+                response = urllib.request.urlopen(http_request, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                if len(attempts) == 1 or index or exc.code not in {400, 422}:
+                    raise
+                exc.close()
+                continue
+            with response as stream:
+                yield from _iter_sse_events(stream)
+            return
 
     async def health_check(self) -> HealthStatus:
         return HealthStatus.HEALTHY

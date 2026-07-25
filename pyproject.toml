@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "corax-llm-local-connector"
-version = "1.1.0"
+version = "1.1.1"
 description = "Standalone Corax model provider for a local Spark LLM with selectable image/video input."
 readme = "README.md"
 requires-python = ">=3.12"

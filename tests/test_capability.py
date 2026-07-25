@@ -114,7 +114,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.1.0")
+        self.assertEqual(data["version"], "1.1.1")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -632,6 +632,22 @@ class StreamHelperTests(unittest.TestCase):
             ["think", " more"],
         )
 
+    def test_iter_sse_events_emits_prompt_token_usage(self) -> None:
+        lines = [
+            b'data: {"choices":[],"usage":{"prompt_tokens":321,"completion_tokens":7}}',
+        ]
+        self.assertEqual(
+            list(main._iter_sse_events(iter(lines))),
+            [{"type": "context", "used": 321, "unit": "tokens"}],
+        )
+
+    def test_sse_event_rejects_invalid_prompt_token_usage(self) -> None:
+        self.assertIsNone(
+            main._sse_event(
+                'data: {"choices":[],"usage":{"prompt_tokens":-1}}'
+            )
+        )
+
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -691,9 +707,10 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         lines = [
             b'data: {"choices":[{"delta":{"reasoning":"thinking"}}]}',
             b'data: {"choices":[{"delta":{"content":"answer"}}]}',
+            b'data: {"choices":[],"usage":{"prompt_tokens":123,"completion_tokens":4}}',
             b"data: [DONE]",
         ]
-        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)):
+        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)) as urlopen:
             events = await _collect(
                 self.cap.stream_generate_events(
                     request({
@@ -704,6 +721,97 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(events[0], {"type": "reasoning", "content": "thinking"})
         self.assertEqual(events[1], {"type": "delta", "content": "answer"})
+        self.assertEqual(
+            events[2],
+            {"type": "context", "used": 123, "unit": "tokens"},
+        )
+        sent = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(sent["stream_options"], {"include_usage": True})
+
+    async def test_stream_events_retries_without_unsupported_stream_options(self) -> None:
+        for status in (400, 422):
+            with self.subTest(status=status):
+                error = urllib.error.HTTPError(
+                    "http://192.168.0.5:8000/v1/chat/completions",
+                    status,
+                    "unsupported stream_options",
+                    {},
+                    None,
+                )
+                lines = [
+                    b'data: {"choices":[{"delta":{"content":"answer"}}]}',
+                    b"data: [DONE]",
+                ]
+                with patch(
+                    "urllib.request.urlopen",
+                    side_effect=[error, _FakeSSE(lines)],
+                ) as urlopen:
+                    events = await _collect(
+                        self.cap.stream_generate_events(
+                            request({
+                                "prompt": "hi",
+                                "base_url": "http://192.168.0.5:8000/v1",
+                            })
+                        )
+                    )
+                self.assertEqual(events[0], {"type": "delta", "content": "answer"})
+                self.assertEqual(urlopen.call_count, 2)
+                first = json.loads(urlopen.call_args_list[0].args[0].data)
+                second = json.loads(urlopen.call_args_list[1].args[0].data)
+                self.assertEqual(first["stream_options"], {"include_usage": True})
+                self.assertNotIn("stream_options", second)
+
+    async def test_stream_events_does_not_retry_other_http_errors(self) -> None:
+        error = urllib.error.HTTPError(
+            "http://192.168.0.5:8000/v1/chat/completions",
+            500,
+            "server error",
+            {},
+            None,
+        )
+        with patch("urllib.request.urlopen", side_effect=error) as urlopen:
+            with self.assertRaises(urllib.error.HTTPError):
+                await _collect(
+                    self.cap.stream_generate_events(
+                        request({
+                            "prompt": "hi",
+                            "base_url": "http://192.168.0.5:8000/v1",
+                        })
+                    )
+                )
+        self.assertEqual(urlopen.call_count, 1)
+
+    async def test_stream_events_propagates_failed_compatibility_retry(self) -> None:
+        errors = [
+            urllib.error.HTTPError("http://x", status, "error", {}, None)
+            for status in (400, 422)
+        ]
+        with patch("urllib.request.urlopen", side_effect=errors) as urlopen:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                await _collect(
+                    self.cap.stream_generate_events(
+                        request({
+                            "prompt": "hi",
+                            "base_url": "http://192.168.0.5:8000/v1",
+                        })
+                    )
+                )
+        self.assertEqual(raised.exception.code, 422)
+        self.assertEqual(urlopen.call_count, 2)
+
+    async def test_stream_helper_does_not_retry_without_stream_options(self) -> None:
+        error = urllib.error.HTTPError("http://x", 400, "bad request", {}, None)
+        with patch("urllib.request.urlopen", side_effect=error) as urlopen:
+            with self.assertRaises(urllib.error.HTTPError):
+                list(
+                    self.cap._post_chat_completion_stream_events(
+                        base_url="http://192.168.0.5:8000/v1",
+                        api_key="local",
+                        payload={"model": "qwen", "messages": [], "stream": True},
+                        timeout=1,
+                    )
+                )
+        self.assertEqual(urlopen.call_count, 1)
 
     async def test_stream_schema_error_raises(self) -> None:
         with self.assertRaises(ValueError):
