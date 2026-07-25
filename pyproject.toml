@@ -5,20 +5,23 @@ build-backend = "hatchling.build"
 [project]
 name = "corax-llm-local-connector"
 version = "1.0.0"
-description = "Standalone Corax capability: connector to a local Spark LLM with selectable image/video input."
+description = "Standalone Corax model provider for a local Spark LLM with selectable image/video input."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Corax" }]
-keywords = ["corax", "agent", "capability", "llm", "local", "spark", "multimodal", "connector"]
+keywords = ["corax", "agent", "extension", "llm", "local", "spark", "multimodal", "model-provider"]
 dependencies = [
   "agent-core @ git+https://github.com/Alex12571333/agent-core.git",
   "agent-sdk @ git+https://github.com/Alex12571333/agent-sdk.git"
 ]
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 include = [
-  "capability.json",
+  "extension.json",
   "main.py",
   "README.md",
   "examples/*.json"
