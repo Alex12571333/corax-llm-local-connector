@@ -418,6 +418,11 @@ def _sse_event(line: str) -> dict[str, Any] | None:
     event: dict[str, Any] = {"type": "delta"}
     if isinstance(delta.get("content"), str):
         event["content"] = delta["content"]
+    reasoning = delta.get("reasoning")
+    if not isinstance(reasoning, str):
+        reasoning = delta.get("reasoning_content")
+    if isinstance(reasoning, str):
+        event["reasoning"] = reasoning
     if isinstance(delta.get("tool_calls"), list):
         event["tool_calls"] = delta["tool_calls"]
     finish_reason = first.get("finish_reason")
@@ -519,7 +524,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.0.0",
+    version="1.1.0",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
@@ -894,6 +899,9 @@ class LocalModelProvider(ModelProvider):
             for tool_delta in event.get("tool_calls") or []:
                 if isinstance(tool_delta, dict):
                     _merge_tool_call_delta(tool_calls, tool_delta)
+            reasoning = event.get("reasoning")
+            if isinstance(reasoning, str) and reasoning:
+                yield {"type": "reasoning", "content": reasoning}
             content = event.get("content")
             if isinstance(content, str) and content:
                 yield {"type": "delta", "content": content}

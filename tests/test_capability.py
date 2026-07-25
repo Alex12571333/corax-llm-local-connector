@@ -114,7 +114,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.0.0")
+        self.assertEqual(data["version"], "1.1.0")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -621,6 +621,17 @@ class StreamHelperTests(unittest.TestCase):
         self.assertEqual(events[0]["tool_calls"][0]["function"]["name"], "filesystem")
         self.assertEqual(events[1]["finish_reason"], "tool_calls")
 
+    def test_iter_sse_events_preserves_reasoning_variants(self) -> None:
+        lines = [
+            b'data: {"choices":[{"delta":{"reasoning":"think"}}]}',
+            b'data: {"choices":[{"delta":{"reasoning_content":" more"}}]}',
+        ]
+        events = list(main._iter_sse_events(iter(lines)))
+        self.assertEqual(
+            [event["reasoning"] for event in events],
+            ["think", " more"],
+        )
+
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -675,6 +686,24 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done["tool_calls"][0]["id"], "call_1")
         self.assertEqual(done["tool_calls"][0]["function"]["name"], "filesystem")
         self.assertEqual(done["tool_calls"][0]["function"]["arguments"], '{"path":"notes.txt"}')
+
+    async def test_stream_events_emits_reasoning_before_content(self) -> None:
+        lines = [
+            b'data: {"choices":[{"delta":{"reasoning":"thinking"}}]}',
+            b'data: {"choices":[{"delta":{"content":"answer"}}]}',
+            b"data: [DONE]",
+        ]
+        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)):
+            events = await _collect(
+                self.cap.stream_generate_events(
+                    request({
+                        "prompt": "hi",
+                        "base_url": "http://192.168.0.5:8000/v1",
+                    })
+                )
+            )
+        self.assertEqual(events[0], {"type": "reasoning", "content": "thinking"})
+        self.assertEqual(events[1], {"type": "delta", "content": "answer"})
 
     async def test_stream_schema_error_raises(self) -> None:
         with self.assertRaises(ValueError):

@@ -8,7 +8,7 @@ Spark on the `192.168.10.0/24` network) through an OpenAI-compatible
 selectable during primary or secondary agent setup.
 
 It is a pure extension package. It does not modify, vendor, or depend on the
-internals of `corax-core`, `corax-sdk`, or `corax-agent`; it only uses their
+internals of `agent-core`, `agent-sdk`, or `corax-agent`; it only uses their
 public contracts (`agent_core.ModelProvider` / `ModelRequest`, the `agent_sdk`
 manifest + loader). The agent can install it without any code change — just
 point an `extensions.available` entry at this directory.
@@ -16,6 +16,7 @@ point an `extensions.available` entry at this directory.
 | | |
 |---|---|
 | id | `llm.local` |
+| version | `1.1.0` |
 | entrypoint | `main:LocalModelProvider` |
 | kind | `model_provider` |
 | permission level | `confirm` |
@@ -41,6 +42,24 @@ Run a completion against the local model.
 Returns `{ text, model, endpoint, enabled_modalities, used_modalities, raw }`.
 You may instead pass a pre-built OpenAI-style `messages` array (without
 `images`/`videos`).
+
+### Streaming events
+
+`stream_generate_events()` keeps reasoning separate from the final answer and
+emits events in provider order:
+
+```jsonc
+{"type": "reasoning", "content": "I should inspect the available tools..."}
+{"type": "delta", "content": "Here is the result"}
+{"type": "done", "tool_calls": [], "finish_reason": "stop"}
+```
+
+OpenAI-compatible servers use both `delta.reasoning` and
+`delta.reasoning_content` in practice; version 1.1 accepts either and maps both
+to the same `reasoning` event. Answer text remains a `delta` event. Incremental
+tool-call fragments are assembled and returned on the terminal `done` event,
+so the runtime can preserve correct tool IDs and arguments without mixing them
+into visible model text.
 
 ### `describe`
 Read-only. Returns the supported and currently-enabled modalities plus a
