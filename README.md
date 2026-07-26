@@ -16,7 +16,7 @@ point an `extensions.available` entry at this directory.
 | | |
 |---|---|
 | id | `llm.local` |
-| version | `1.1.1` |
+| version | `1.1.2` |
 | entrypoint | `main:LocalModelProvider` |
 | kind | `model_provider` |
 | permission level | `confirm` |
@@ -61,7 +61,9 @@ to the same `reasoning` event. Answer text remains a `delta` event. Incremental
 tool-call fragments are assembled and returned on the terminal `done` event,
 so the runtime can preserve correct tool IDs and arguments without mixing them
 into visible model text. The connector requests OpenAI-compatible streaming
-usage and emits exact `prompt_tokens` as a context event. Servers that reject
+usage and emits exact `total_tokens` as a context event, falling back to
+`prompt_tokens + completion_tokens` when both are present. Incomplete usage is
+ignored instead of being labelled exact. Servers that reject
 `stream_options` with HTTP 400/422 are retried once without that optional
 field, preserving streaming compatibility.
 
