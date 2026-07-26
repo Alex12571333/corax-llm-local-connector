@@ -413,19 +413,26 @@ def _sse_event(line: str) -> dict[str, Any] | None:
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
         total_tokens = usage.get("total_tokens")
-        if type(total_tokens) is int and total_tokens >= 0:
-            used = total_tokens
+        if type(prompt_tokens) is int and prompt_tokens >= 0:
+            used = prompt_tokens
         elif (
-            type(prompt_tokens) is int
-            and prompt_tokens >= 0
+            type(total_tokens) is int
+            and total_tokens >= 0
             and type(completion_tokens) is int
             and completion_tokens >= 0
+            and total_tokens >= completion_tokens
         ):
-            used = prompt_tokens + completion_tokens
+            used = total_tokens - completion_tokens
         else:
             used = None
         if used is not None:
-            return {"type": "context", "used": used, "unit": "tokens"}
+            return {
+                "type": "context",
+                "used": used,
+                "unit": "tokens",
+                "scope": "prompt",
+                "source": "provider",
+            }
     choices = obj.get("choices")
     if not isinstance(choices, list) or not choices:
         return None
@@ -542,7 +549,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.1.2",
+    version="1.1.3",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],

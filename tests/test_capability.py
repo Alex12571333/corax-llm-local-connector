@@ -114,7 +114,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.1.2")
+        self.assertEqual(data["version"], "1.1.3")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -632,21 +632,33 @@ class StreamHelperTests(unittest.TestCase):
             ["think", " more"],
         )
 
-    def test_iter_sse_events_emits_total_context_usage(self) -> None:
+    def test_iter_sse_events_emits_provider_prompt_context_usage(self) -> None:
         lines = [
             b'data: {"choices":[],"usage":{"prompt_tokens":321,"completion_tokens":7,"total_tokens":400,"prompt_tokens_details":{"cached_tokens":111},"completion_tokens_details":{"reasoning_tokens":5}}}',
         ]
         self.assertEqual(
             list(main._iter_sse_events(iter(lines))),
-            [{"type": "context", "used": 400, "unit": "tokens"}],
+            [{
+                "type": "context",
+                "used": 321,
+                "unit": "tokens",
+                "scope": "prompt",
+                "source": "provider",
+            }],
         )
 
-    def test_sse_event_falls_back_to_prompt_plus_completion(self) -> None:
+    def test_sse_event_derives_prompt_from_total_minus_completion(self) -> None:
         self.assertEqual(
             main._sse_event(
-                'data: {"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":4}}'
+                'data: {"choices":[],"usage":{"completion_tokens":4,"total_tokens":24}}'
             ),
-            {"type": "context", "used": 24, "unit": "tokens"},
+            {
+                "type": "context",
+                "used": 20,
+                "unit": "tokens",
+                "scope": "prompt",
+                "source": "provider",
+            },
         )
 
     def test_sse_event_rejects_invalid_token_usage(self) -> None:
@@ -657,7 +669,7 @@ class StreamHelperTests(unittest.TestCase):
         )
         self.assertIsNone(
             main._sse_event(
-                'data: {"choices":[],"usage":{"prompt_tokens":20}}'
+                'data: {"choices":[],"usage":{"completion_tokens":20,"total_tokens":4}}'
             )
         )
 
@@ -736,7 +748,13 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1], {"type": "delta", "content": "answer"})
         self.assertEqual(
             events[2],
-            {"type": "context", "used": 127, "unit": "tokens"},
+            {
+                "type": "context",
+                "used": 123,
+                "unit": "tokens",
+                "scope": "prompt",
+                "source": "provider",
+            },
         )
         sent = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(sent["stream_options"], {"include_usage": True})

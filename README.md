@@ -16,7 +16,7 @@ point an `extensions.available` entry at this directory.
 | | |
 |---|---|
 | id | `llm.local` |
-| version | `1.1.2` |
+| version | `1.1.3` |
 | entrypoint | `main:LocalModelProvider` |
 | kind | `model_provider` |
 | permission level | `confirm` |
@@ -51,7 +51,7 @@ emits events in provider order:
 ```jsonc
 {"type": "reasoning", "content": "I should inspect the available tools..."}
 {"type": "delta", "content": "Here is the result"}
-{"type": "context", "used": 1234, "unit": "tokens"}
+{"type": "context", "used": 1234, "unit": "tokens", "scope": "prompt", "source": "provider"}
 {"type": "done", "tool_calls": [], "finish_reason": "stop"}
 ```
 
@@ -61,9 +61,12 @@ to the same `reasoning` event. Answer text remains a `delta` event. Incremental
 tool-call fragments are assembled and returned on the terminal `done` event,
 so the runtime can preserve correct tool IDs and arguments without mixing them
 into visible model text. The connector requests OpenAI-compatible streaming
-usage and emits exact `total_tokens` as a context event, falling back to
-`prompt_tokens + completion_tokens` when both are present. Incomplete usage is
-ignored instead of being labelled exact. Servers that reject
+usage and emits exact provider `prompt_tokens` as the occupied-context event.
+If a server omits that field but supplies valid `total_tokens` and
+`completion_tokens`, the prompt count is derived by subtraction. Completion
+and reasoning usage are deliberately excluded from the context-window meter;
+consumers may track them separately as cumulative usage. Incomplete usage is ignored
+instead of being labelled exact. Servers that reject
 `stream_options` with HTTP 400/422 are retried once without that optional
 field, preserving streaming compatibility.
 
