@@ -564,7 +564,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.1.4",
+    version="1.1.5",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
@@ -584,6 +584,44 @@ class LocalModelProvider(ModelProvider):
     async def generate(self, request: ModelRequest) -> Result:
         """Generate through the model-provider contract."""
         return await self.execute(_model_capability_request(request))
+
+    async def count_tokens(
+        self,
+        request: ModelRequest | CapabilityRequest,
+    ) -> int | None:
+        """Return vLLM's exact prepared prompt size when `/tokenize` is available."""
+        data = _model_capability_request(request).input
+        errors = core_schema.validate(data, INPUT_SCHEMA)
+        if errors:
+            raise ValueError("; ".join(errors))
+        if isinstance(data.get("mock_response"), str):
+            return None
+        plan = self._plan(data)
+        base_url = _resolve_base_url(data)
+        _ensure_local_endpoint(base_url)
+        payload: dict[str, Any] = {
+            "model": _resolve_model(data),
+            "messages": plan["messages"],
+            "add_generation_prompt": True,
+        }
+        if "tools" in data:
+            payload["tools"] = data["tools"]
+        api_key = os.getenv("CORAX_LLM_API_KEY") or DEFAULT_LOCAL_API_KEY
+        try:
+            raw = await asyncio.to_thread(
+                self._post_tokenize,
+                base_url=base_url,
+                api_key=api_key,
+                payload=payload,
+                timeout=_resolve_timeout(data),
+            )
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            return None
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+            return None
+        count = raw.get("count")
+        return count if type(count) is int and count >= 0 else None
 
     async def execute(self, request: CapabilityRequest) -> Result:
         try:
@@ -790,6 +828,29 @@ class LocalModelProvider(ModelProvider):
         http_request = urllib.request.Request(
             endpoint,
             data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(http_request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _post_tokenize(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        payload: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        root = base_url.rstrip("/")
+        if root.endswith("/v1"):
+            root = root[:-3]
+        http_request = urllib.request.Request(
+            f"{root}/tokenize",
+            data=json.dumps(payload).encode("utf-8"),
             method="POST",
             headers={
                 "Authorization": f"Bearer {api_key}",

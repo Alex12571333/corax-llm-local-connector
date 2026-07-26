@@ -62,6 +62,9 @@ tool-call fragments are assembled and returned on the terminal `done` event,
 so the runtime can preserve correct tool IDs and arguments without mixing them
 into visible model text. The connector requests OpenAI-compatible streaming
 usage and emits exact provider `prompt_tokens` as the occupied-context event.
+Its optional `count_tokens` method calls the same vLLM server's `/tokenize`
+endpoint with the prepared messages and tools, giving the host an exact
+preflight value without changing the universal model-provider contract.
 If a server omits that field but supplies valid `total_tokens` and
 `completion_tokens`, the prompt count is derived by subtraction. Completion
 and reasoning usage are deliberately excluded from the context-window meter;

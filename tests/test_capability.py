@@ -12,6 +12,7 @@ import urllib.error
 from agent_core import (
     CapabilityRequest,
     ErrorCode,
+    ModelRequest,
     ModelProvider,
     PermissionLevel,
     ResultStatus,
@@ -114,7 +115,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.1.4")
+        self.assertEqual(data["version"], "1.1.5")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -179,6 +180,45 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(result.payload["model"], "gemma-4")
+
+    async def test_count_tokens_posts_prepared_messages_and_tools(self) -> None:
+        messages = ({"role": "user", "content": "hello"},)
+        tools = [{"type": "function", "function": {"name": "web.search"}}]
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_FakeResponse({"count": 2345}),
+        ) as urlopen:
+            used = await self.cap.count_tokens(
+                ModelRequest(
+                    messages=messages,
+                    model="qwen",
+                    parameters={
+                        "base_url": "http://192.168.0.5:8000/v1",
+                        "tools": tools,
+                        "tool_choice": "auto",
+                    },
+                )
+            )
+
+        sent_request = urlopen.call_args.args[0]
+        sent = json.loads(sent_request.data)
+        self.assertEqual(used, 2345)
+        self.assertEqual(sent_request.full_url, "http://192.168.0.5:8000/tokenize")
+        self.assertEqual(sent["messages"], list(messages))
+        self.assertEqual(sent["tools"], tools)
+        self.assertTrue(sent["add_generation_prompt"])
+        self.assertNotIn("tool_choice", sent)
+
+    async def test_count_tokens_fails_soft_when_endpoint_is_unavailable(self) -> None:
+        error = urllib.error.HTTPError("http://x/tokenize", 404, "missing", {}, None)
+        with patch("urllib.request.urlopen", side_effect=error):
+            used = await self.cap.count_tokens(
+                ModelRequest(
+                    prompt="hello",
+                    parameters={"base_url": "http://192.168.0.5:8000/v1"},
+                )
+            )
+        self.assertIsNone(used)
 
     async def test_messages_with_media_is_rejected(self) -> None:
         os.environ["CORAX_LLM_ENABLE_IMAGE"] = "true"
