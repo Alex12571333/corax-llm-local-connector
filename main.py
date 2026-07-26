@@ -61,6 +61,8 @@ DEFAULT_LOCAL_API_KEY = "local"
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 MAX_TIMEOUT_SECONDS = 600.0
+DEFAULT_MAX_TOKENS = 4096
+MAX_MAX_TOKENS = 32768
 MAX_MEDIA_ITEMS = 16
 MAX_OUTPUT_CHARS = 20000
 
@@ -279,6 +281,19 @@ def _resolve_timeout(data: dict[str, Any]) -> float:
             f"timeout_seconds must be > 0 and <= {MAX_TIMEOUT_SECONDS:g}"
         )
     return timeout
+
+
+def _resolve_max_tokens(data: dict[str, Any]) -> int:
+    max_tokens = data.get("max_tokens", DEFAULT_MAX_TOKENS)
+    if (
+        type(max_tokens) is not int
+        or max_tokens <= 0
+        or max_tokens > MAX_MAX_TOKENS
+    ):
+        raise ValueError(
+            f"max_tokens must be an integer from 1 to {MAX_MAX_TOKENS}"
+        )
+    return max_tokens
 
 
 def _ensure_local_endpoint(base_url: str) -> None:
@@ -549,7 +564,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.1.3",
+    version="1.1.4",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
@@ -656,11 +671,13 @@ class LocalModelProvider(ModelProvider):
         _ensure_local_endpoint(base_url)
         timeout = _resolve_timeout(data)
 
-        payload: dict[str, Any] = {"model": model, "messages": plan["messages"]}
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": plan["messages"],
+            "max_tokens": _resolve_max_tokens(data),
+        }
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
-        if "max_tokens" in data:
-            payload["max_tokens"] = data["max_tokens"]
         if "tools" in data:
             payload["tools"] = data["tools"]
         if "tool_choice" in data:
@@ -814,11 +831,10 @@ class LocalModelProvider(ModelProvider):
             "model": _resolve_model(data),
             "messages": plan["messages"],
             "stream": True,
+            "max_tokens": _resolve_max_tokens(data),
         }
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
-        if "max_tokens" in data:
-            payload["max_tokens"] = data["max_tokens"]
         api_key = os.getenv("CORAX_LLM_API_KEY") or DEFAULT_LOCAL_API_KEY
 
         queue: asyncio.Queue = asyncio.Queue()
@@ -877,11 +893,10 @@ class LocalModelProvider(ModelProvider):
             "messages": plan["messages"],
             "stream": True,
             "stream_options": {"include_usage": True},
+            "max_tokens": _resolve_max_tokens(data),
         }
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
-        if "max_tokens" in data:
-            payload["max_tokens"] = data["max_tokens"]
         if "tools" in data:
             payload["tools"] = data["tools"]
         if "tool_choice" in data:

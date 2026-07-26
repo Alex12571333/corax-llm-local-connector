@@ -16,7 +16,7 @@ point an `extensions.available` entry at this directory.
 | | |
 |---|---|
 | id | `llm.local` |
-| version | `1.1.3` |
+| version | `1.1.4` |
 | entrypoint | `main:LocalModelProvider` |
 | kind | `model_provider` |
 | permission level | `confirm` |
@@ -69,6 +69,9 @@ consumers may track them separately as cumulative usage. Incomplete usage is ign
 instead of being labelled exact. Servers that reject
 `stream_options` with HTTP 400/422 are retried once without that optional
 field, preserving streaming compatibility.
+
+Every completion is bounded by `max_tokens`: 4,096 by default and at most
+32,768 per request.
 
 ### `describe`
 Read-only. Returns the supported and currently-enabled modalities plus a

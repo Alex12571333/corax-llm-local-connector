@@ -114,7 +114,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.1.3")
+        self.assertEqual(data["version"], "1.1.4")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -287,6 +287,21 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.error.code, ErrorCode.INVALID_INPUT)
 
+    async def test_out_of_range_max_tokens_rejected(self) -> None:
+        for max_tokens in (0, -1, 32769):
+            with self.subTest(max_tokens=max_tokens):
+                result = await self.cap.execute(
+                    request(
+                        {
+                            "prompt": "x",
+                            "max_tokens": max_tokens,
+                            "base_url": "http://127.0.0.1:9/v1",
+                        }
+                    )
+                )
+                self.assertEqual(result.error.code, ErrorCode.INVALID_INPUT)
+                self.assertIn("1 to 32768", result.error.message)
+
     async def test_unsupported_operation(self) -> None:
         result = await self.cap.execute(request({"operation": "frobnicate"}))
         self.assertEqual(result.error.code, ErrorCode.INVALID_INPUT)
@@ -322,6 +337,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         sent = urlopen.call_args.args[0]
         self.assertEqual(sent.full_url, f"{base_url}/chat/completions")
         self.assertEqual(sent.headers["Authorization"], "Bearer secret-token")
+        self.assertEqual(json.loads(sent.data)["max_tokens"], 64)
         self.assertNotIn("secret-token", json.dumps(result.payload))
 
     async def test_generate_loopback_text_choice(self) -> None:
@@ -333,6 +349,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(result.payload["text"], "via-text")
         self.assertEqual(result.payload["model"], "google/gemma-4-12B-it")  # default model
+        self.assertEqual(fake.call_args.kwargs["payload"]["max_tokens"], 4096)
 
     async def test_localhost_endpoint_allowed(self) -> None:
         fake = MagicMock(return_value={"choices": []})
@@ -697,13 +714,17 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             b'data: {"choices":[{"delta":{"content":"lo"}}]}',
             b"data: [DONE]",
         ]
-        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)):
+        with patch("urllib.request.urlopen", return_value=_FakeSSE(lines)) as urlopen:
             chunks = await _collect(
                 self.cap.stream_generate(
                     request({"prompt": "hi", "base_url": "http://192.168.0.5:8000/v1", "temperature": 0.1, "max_tokens": 32})
                 )
             )
         self.assertEqual("".join(chunks), "Hello")
+        self.assertEqual(
+            json.loads(urlopen.call_args.args[0].data)["max_tokens"],
+            32,
+        )
 
     async def test_stream_events_real_with_tool_calls(self) -> None:
         lines = [
@@ -758,6 +779,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         sent = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(sent["stream_options"], {"include_usage": True})
+        self.assertEqual(sent["max_tokens"], 4096)
 
     async def test_stream_events_retries_without_unsupported_stream_options(self) -> None:
         for status in (400, 422):
@@ -848,6 +870,20 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await _collect(
                 self.cap.stream_generate(request({"prompt": "hi", "temperature": "hot"}))
+            )
+
+    async def test_stream_out_of_range_max_tokens_raises(self) -> None:
+        with self.assertRaisesRegex(ValueError, "1 to 32768"):
+            await _collect(
+                self.cap.stream_generate(
+                    request(
+                        {
+                            "prompt": "hi",
+                            "max_tokens": 0,
+                            "base_url": "http://127.0.0.1:9/v1",
+                        }
+                    )
+                )
             )
 
     async def test_stream_plan_error_raises(self) -> None:
