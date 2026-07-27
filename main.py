@@ -117,6 +117,7 @@ OUTPUT_SCHEMA = {
         "env_assignments": {"type": "object"},
         "tool_calls": {"type": "array"},
         "finish_reason": {},
+        "cached_tokens": {"type": "integer"},
     },
     "required": ["operation"],
 }
@@ -441,13 +442,17 @@ def _sse_event(line: str) -> dict[str, Any] | None:
         else:
             used = None
         if used is not None:
-            return {
+            event = {
                 "type": "context",
                 "used": used,
                 "unit": "tokens",
                 "scope": "prompt",
                 "source": "provider",
             }
+            cached_tokens = _cached_prompt_tokens(obj)
+            if cached_tokens is not None:
+                event["cached_tokens"] = cached_tokens
+            return event
     choices = obj.get("choices")
     if not isinstance(choices, list) or not choices:
         return None
@@ -531,6 +536,13 @@ def _extract_text(response: dict[str, Any]) -> str:
     return text[:MAX_OUTPUT_CHARS] if isinstance(text, str) else ""
 
 
+def _cached_prompt_tokens(response: dict[str, Any]) -> int | None:
+    usage = response.get("usage")
+    details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+    value = details.get("cached_tokens") if isinstance(details, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
 def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -564,7 +576,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.1.5",
+    version="1.1.6",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
@@ -755,20 +767,21 @@ class LocalModelProvider(ModelProvider):
                 retryable=True,
             )
 
-        return _ok(
-            request,
-            {
-                "operation": "generate",
-                "text": _extract_text(raw),
-                "model": str(raw.get("model") or model),
-                "endpoint": base_url,
-                "enabled_modalities": _ordered(plan["enabled"]),
-                "used_modalities": used,
-                "tool_calls": _extract_tool_calls(raw),
-                "finish_reason": _finish_reason(raw),
-                "raw": raw,
-            },
-        )
+        result = {
+            "operation": "generate",
+            "text": _extract_text(raw),
+            "model": str(raw.get("model") or model),
+            "endpoint": base_url,
+            "enabled_modalities": _ordered(plan["enabled"]),
+            "used_modalities": used,
+            "tool_calls": _extract_tool_calls(raw),
+            "finish_reason": _finish_reason(raw),
+            "raw": raw,
+        }
+        cached_tokens = _cached_prompt_tokens(raw)
+        if cached_tokens is not None:
+            result["cached_tokens"] = cached_tokens
+        return _ok(request, result)
 
     def _configure(self, request: CapabilityRequest, data: dict[str, Any]) -> Result:
         enabled = _selection_from_request(data)

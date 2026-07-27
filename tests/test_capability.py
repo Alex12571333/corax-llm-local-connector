@@ -115,7 +115,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.1.5")
+        self.assertEqual(data["version"], "1.1.6")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -607,6 +607,18 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tools", captured["payload"])
         self.assertEqual(captured["payload"]["tool_choice"], "auto")
 
+    async def test_generate_exposes_cached_prompt_tokens(self) -> None:
+        raw = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens_details": {"cached_tokens": 111}},
+        }
+        with patch.object(self.cap, "_post_chat_completion", return_value=raw):
+            result = await self.cap.execute(
+                request({"prompt": "hi", "base_url": "http://127.0.0.1:9/v1"})
+            )
+        self.assertEqual(result.payload["cached_tokens"], 111)
+        self.assertIs(result.payload["raw"], raw)
+
     # -- state_key echo (kernel/gateway round-trip) --------------------- #
     async def test_state_key_echoes_payload(self) -> None:
         result = await self.cap.execute(
@@ -701,6 +713,7 @@ class StreamHelperTests(unittest.TestCase):
                 "unit": "tokens",
                 "scope": "prompt",
                 "source": "provider",
+                "cached_tokens": 111,
             }],
         )
 

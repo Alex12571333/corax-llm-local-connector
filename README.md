@@ -39,7 +39,9 @@ Run a completion against the local model.
   "images": ["https://host/frame.png"]   // only if image input is enabled
 }
 ```
-Returns `{ text, model, endpoint, enabled_modalities, used_modalities, raw }`.
+Returns `{ text, model, endpoint, enabled_modalities, used_modalities,
+cached_tokens, raw }`. `cached_tokens` is present when the provider reports
+`usage.prompt_tokens_details.cached_tokens`.
 You may instead pass a pre-built OpenAI-style `messages` array (without
 `images`/`videos`).
 
@@ -51,7 +53,7 @@ emits events in provider order:
 ```jsonc
 {"type": "reasoning", "content": "I should inspect the available tools..."}
 {"type": "delta", "content": "Here is the result"}
-{"type": "context", "used": 1234, "unit": "tokens", "scope": "prompt", "source": "provider"}
+{"type": "context", "used": 1234, "cached_tokens": 1024, "unit": "tokens", "scope": "prompt", "source": "provider"}
 {"type": "done", "tool_calls": [], "finish_reason": "stop"}
 ```
 
@@ -62,6 +64,9 @@ tool-call fragments are assembled and returned on the terminal `done` event,
 so the runtime can preserve correct tool IDs and arguments without mixing them
 into visible model text. The connector requests OpenAI-compatible streaming
 usage and emits exact provider `prompt_tokens` as the occupied-context event.
+When supplied by the server, the same event also exposes the non-negative
+`prompt_tokens_details.cached_tokens` count; older servers keep the previous
+event shape.
 Its optional `count_tokens` method calls the same vLLM server's `/tokenize`
 endpoint with the prepared messages and tools, giving the host an exact
 preflight value without changing the universal model-provider contract.
