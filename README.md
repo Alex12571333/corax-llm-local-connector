@@ -16,7 +16,7 @@ point an `extensions.available` entry at this directory.
 | | |
 |---|---|
 | id | `llm.local` |
-| version | `1.1.4` |
+| version | `1.1.7` |
 | entrypoint | `main:LocalModelProvider` |
 | kind | `model_provider` |
 | permission level | `confirm` |
@@ -73,13 +73,18 @@ preflight value without changing the universal model-provider contract.
 If a server omits that field but supplies valid `total_tokens` and
 `completion_tokens`, the prompt count is derived by subtraction. Completion
 and reasoning usage are deliberately excluded from the context-window meter;
-consumers may track them separately as cumulative usage. Incomplete usage is ignored
-instead of being labelled exact. Servers that reject
-`stream_options` with HTTP 400/422 are retried once without that optional
-field, preserving streaming compatibility.
+consumers may track them separately as cumulative usage. Incomplete usage is
+ignored instead of being labelled exact. Servers that reject
+`stream_options` with HTTP 400/422 are retried without that optional field,
+preserving streaming compatibility.
 
-Every completion is bounded by `max_tokens`: 4,096 by default and at most
-32,768 per request.
+Every completion has a 32,768-token output envelope by default and accepts up
+to 81,920 tokens per request. Reasoning is not separately capped. An explicit
+`thinking_token_budget` request field or
+`CORAX_LLM_THINKING_TOKEN_BUDGET` environment override may set a provider
+budget; `-1` means unlimited. If an older server rejects a finite budget, the
+connector retries with thinking disabled instead of silently allowing an
+unbounded reasoning loop.
 
 ### `describe`
 Read-only. Returns the supported and currently-enabled modalities plus a
@@ -122,6 +127,7 @@ that supplies a disabled modality is refused with a `POLICY_DENIED` result.
 | `CORAX_LLM_BASE_URL` | `http://192.168.0.10:8000/v1` | Spark vLLM endpoint (GB10, OpenAI-compatible) |
 | `CORAX_LLM_MODEL` | `google/gemma-4-12B-it` | default served model (Gemma 4, vision-capable) |
 | `CORAX_LLM_API_KEY` | `local` | bearer token; never echoed back |
+| `CORAX_LLM_THINKING_TOKEN_BUDGET` | unset | optional explicit reasoning budget; `-1` is unlimited |
 
 Per-request `base_url` / `model` override the environment.
 

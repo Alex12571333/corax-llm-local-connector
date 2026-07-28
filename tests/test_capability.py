@@ -40,6 +40,7 @@ _ENV_KEYS = (
     "CORAX_LLM_MODALITIES",
     "CORAX_LLM_ENABLE_IMAGE",
     "CORAX_LLM_ENABLE_VIDEO",
+    "CORAX_LLM_THINKING_TOKEN_BUDGET",
 )
 
 
@@ -115,7 +116,7 @@ class ManifestTests(unittest.TestCase):
 
         self.assertEqual(data["id"], "llm.local")
         self.assertEqual(data["name"], "LLM Local Connector")
-        self.assertEqual(data["version"], "1.1.6")
+        self.assertEqual(data["version"], "1.1.7")
         self.assertEqual(data["author"], "Corax")
         self.assertEqual(data["license"], "MIT")
         self.assertEqual(data["kind"], "model_provider")
@@ -328,7 +329,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error.code, ErrorCode.INVALID_INPUT)
 
     async def test_out_of_range_max_tokens_rejected(self) -> None:
-        for max_tokens in (0, -1, 32769):
+        for max_tokens in (0, -1, 81921):
             with self.subTest(max_tokens=max_tokens):
                 result = await self.cap.execute(
                     request(
@@ -340,7 +341,24 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(result.error.code, ErrorCode.INVALID_INPUT)
-                self.assertIn("1 to 32768", result.error.message)
+                self.assertIn("1 to 81920", result.error.message)
+
+    async def test_thinking_budget_is_opt_in_and_env_overridable(self) -> None:
+        self.assertIsNone(
+            main._resolve_thinking_token_budget({}, max_tokens=32768)
+        )
+        os.environ["CORAX_LLM_THINKING_TOKEN_BUDGET"] = "4096"
+        self.assertEqual(
+            main._resolve_thinking_token_budget({}, max_tokens=32768),
+            4096,
+        )
+        self.assertEqual(
+            main._resolve_thinking_token_budget(
+                {"thinking_token_budget": -1},
+                max_tokens=32768,
+            ),
+            -1,
+        )
 
     async def test_unsupported_operation(self) -> None:
         result = await self.cap.execute(request({"operation": "frobnicate"}))
@@ -377,8 +395,55 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         sent = urlopen.call_args.args[0]
         self.assertEqual(sent.full_url, f"{base_url}/chat/completions")
         self.assertEqual(sent.headers["Authorization"], "Bearer secret-token")
-        self.assertEqual(json.loads(sent.data)["max_tokens"], 64)
+        sent_payload = json.loads(sent.data)
+        self.assertEqual(sent_payload["max_tokens"], 64)
+        self.assertNotIn("thinking_token_budget", sent_payload)
         self.assertNotIn("secret-token", json.dumps(result.payload))
+
+    async def test_generate_qwen_retries_without_thinking_budget(self) -> None:
+        error = urllib.error.HTTPError(
+            "http://x",
+            400,
+            "unsupported thinking_token_budget",
+            {},
+            None,
+        )
+        fake = _FakeResponse(
+            {
+                "model": "qwen3.6",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=[error, fake],
+        ) as urlopen:
+            result = await self.cap.execute(
+                request(
+                    {
+                        "prompt": "ping",
+                        "model": "qwen3.6",
+                        "base_url": "http://192.168.0.5:8000/v1",
+                        "max_tokens": 64,
+                        "thinking_token_budget": 32,
+                    }
+                )
+            )
+
+        self.assertEqual(result.payload["text"], "pong")
+        first = json.loads(urlopen.call_args_list[0].args[0].data)
+        second = json.loads(urlopen.call_args_list[1].args[0].data)
+        self.assertEqual(first["thinking_token_budget"], 32)
+        self.assertNotIn("thinking_token_budget", second)
+        self.assertEqual(
+            second["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
 
     async def test_generate_loopback_text_choice(self) -> None:
         fake = MagicMock(return_value={"choices": [{"text": "via-text"}]})
@@ -389,7 +454,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(result.payload["text"], "via-text")
         self.assertEqual(result.payload["model"], "google/gemma-4-12B-it")  # default model
-        self.assertEqual(fake.call_args.kwargs["payload"]["max_tokens"], 4096)
+        self.assertEqual(fake.call_args.kwargs["payload"]["max_tokens"], 32768)
 
     async def test_localhost_endpoint_allowed(self) -> None:
         fake = MagicMock(return_value={"choices": []})
@@ -415,6 +480,15 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 request({"prompt": "p", "base_url": "http://127.0.0.1:9/v1"})
             )
         self.assertEqual(result.payload["text"], "")
+
+    def test_extract_text_preserves_large_model_output(self) -> None:
+        content = "x" * 100_000
+        self.assertEqual(
+            main._extract_text(
+                {"choices": [{"message": {"content": content}}]}
+            ),
+            content,
+        )
 
     # -- endpoint security ---------------------------------------------- #
     async def test_endpoint_without_host(self) -> None:
@@ -814,7 +888,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.cap.stream_generate_events(
                     request({
                         "prompt": "hi",
+                        "model": "qwen3.6-35b-a3b",
                         "base_url": "http://192.168.0.5:8000/v1",
+                        "thinking_token_budget": 4096,
                     })
                 )
             )
@@ -832,7 +908,8 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         sent = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(sent["stream_options"], {"include_usage": True})
-        self.assertEqual(sent["max_tokens"], 4096)
+        self.assertEqual(sent["max_tokens"], 32768)
+        self.assertEqual(sent["thinking_token_budget"], 4096)
 
     async def test_stream_events_retries_without_unsupported_stream_options(self) -> None:
         for status in (400, 422):
@@ -856,7 +933,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                         self.cap.stream_generate_events(
                             request({
                                 "prompt": "hi",
+                                "model": "qwen3.6-35b-a3b",
                                 "base_url": "http://192.168.0.5:8000/v1",
+                                "thinking_token_budget": 4096,
                             })
                         )
                     )
@@ -865,7 +944,46 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 first = json.loads(urlopen.call_args_list[0].args[0].data)
                 second = json.loads(urlopen.call_args_list[1].args[0].data)
                 self.assertEqual(first["stream_options"], {"include_usage": True})
+                self.assertEqual(first["thinking_token_budget"], 4096)
                 self.assertNotIn("stream_options", second)
+                self.assertEqual(second["thinking_token_budget"], 4096)
+
+    async def test_stream_events_falls_back_to_no_thinking(self) -> None:
+        errors = [
+            urllib.error.HTTPError("http://x", status, "unsupported", {}, None)
+            for status in (400, 422)
+        ]
+        lines = [
+            b'data: {"choices":[{"delta":{"content":"answer"}}]}',
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            b"data: [DONE]",
+        ]
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=[*errors, _FakeSSE(lines)],
+        ) as urlopen:
+            events = await _collect(
+                self.cap.stream_generate_events(
+                    request(
+                        {
+                            "prompt": "hi",
+                            "model": "qwen3.6-35b-a3b",
+                            "base_url": "http://192.168.0.5:8000/v1",
+                            "thinking_token_budget": 4096,
+                        }
+                    )
+                )
+            )
+
+        self.assertEqual(events[0], {"type": "delta", "content": "answer"})
+        self.assertEqual(events[-1]["finish_reason"], "stop")
+        third = json.loads(urlopen.call_args_list[2].args[0].data)
+        self.assertNotIn("stream_options", third)
+        self.assertNotIn("thinking_token_budget", third)
+        self.assertEqual(
+            third["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
 
     async def test_stream_events_does_not_retry_other_http_errors(self) -> None:
         error = urllib.error.HTTPError(
@@ -926,7 +1044,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_stream_out_of_range_max_tokens_raises(self) -> None:
-        with self.assertRaisesRegex(ValueError, "1 to 32768"):
+        with self.assertRaisesRegex(ValueError, "1 to 81920"):
             await _collect(
                 self.cap.stream_generate(
                     request(

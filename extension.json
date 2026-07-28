@@ -4,7 +4,7 @@
   "kind": "model_provider",
   "name": "LLM Local Connector",
   "description": "Connect Corax to a local LLM on the Spark device through an OpenAI-compatible endpoint, with text plus optional image/video input selectable during agent setup.",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "author": "Corax",
   "license": "MIT",
   "homepage": "",
@@ -58,6 +58,9 @@
           "type": "number"
         },
         "max_tokens": {
+          "type": "integer"
+        },
+        "thinking_token_budget": {
           "type": "integer"
         },
         "base_url": {

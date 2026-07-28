@@ -61,10 +61,9 @@ DEFAULT_LOCAL_API_KEY = "local"
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
 MAX_TIMEOUT_SECONDS = 600.0
-DEFAULT_MAX_TOKENS = 4096
-MAX_MAX_TOKENS = 32768
+DEFAULT_MAX_TOKENS = 32768
+MAX_MAX_TOKENS = 81920
 MAX_MEDIA_ITEMS = 16
-MAX_OUTPUT_CHARS = 20000
 
 SUPPORTED_MODALITIES = ("text", "image", "video")
 TOGGLEABLE_MODALITIES = ("image", "video")
@@ -85,6 +84,7 @@ INPUT_SCHEMA = {
         "model": {"type": "string"},
         "temperature": {"type": "number"},
         "max_tokens": {"type": "integer"},
+        "thinking_token_budget": {"type": "integer"},
         "base_url": {"type": "string"},
         "images": {"type": "array"},
         "videos": {"type": "array"},
@@ -295,6 +295,51 @@ def _resolve_max_tokens(data: dict[str, Any]) -> int:
             f"max_tokens must be an integer from 1 to {MAX_MAX_TOKENS}"
         )
     return max_tokens
+
+
+def _resolve_thinking_token_budget(
+    data: dict[str, Any],
+    *,
+    max_tokens: int,
+) -> int | None:
+    raw: Any = data.get("thinking_token_budget")
+    if raw is None:
+        configured = os.getenv("CORAX_LLM_THINKING_TOKEN_BUDGET", "").strip()
+        raw = configured or None
+    if raw is None:
+        return None
+    if type(raw) is str:
+        try:
+            raw = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                "thinking_token_budget must be an integer"
+            ) from exc
+    if (
+        type(raw) is not int
+        or raw < -1
+        or raw >= max_tokens
+    ):
+        raise ValueError(
+            "thinking_token_budget must be -1 (unlimited) or an integer "
+            f"from 0 to {max_tokens - 1}"
+        )
+    return raw
+
+
+def _completion_attempts(payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    attempts = [payload]
+    without_stream_options = dict(payload)
+    without_stream_options.pop("stream_options", None)
+    if without_stream_options != payload:
+        attempts.append(without_stream_options)
+    if "thinking_token_budget" in payload:
+        no_thinking = dict(without_stream_options)
+        budget = no_thinking.pop("thinking_token_budget")
+        if budget != -1:
+            no_thinking["chat_template_kwargs"] = {"enable_thinking": False}
+        attempts.append(no_thinking)
+    return tuple(attempts)
 
 
 def _ensure_local_endpoint(base_url: str) -> None:
@@ -531,9 +576,9 @@ def _extract_text(response: dict[str, Any]) -> str:
     if isinstance(message, dict):
         content = message.get("content")
         if isinstance(content, str):
-            return content[:MAX_OUTPUT_CHARS]
+            return content
     text = first.get("text")
-    return text[:MAX_OUTPUT_CHARS] if isinstance(text, str) else ""
+    return text if isinstance(text, str) else ""
 
 
 def _cached_prompt_tokens(response: dict[str, Any]) -> int | None:
@@ -576,7 +621,7 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         "OpenAI-compatible endpoint, with text plus optional image/video input "
         "selectable during agent setup."
     ),
-    version="1.1.6",
+    version="1.1.7",
     author="Corax",
     license="MIT",
     tags=["llm", "local", "model-provider", "spark", "multimodal", "vision"],
@@ -720,12 +765,19 @@ class LocalModelProvider(ModelProvider):
         base_url = _resolve_base_url(data)
         _ensure_local_endpoint(base_url)
         timeout = _resolve_timeout(data)
+        max_tokens = _resolve_max_tokens(data)
 
         payload: dict[str, Any] = {
             "model": model,
             "messages": plan["messages"],
-            "max_tokens": _resolve_max_tokens(data),
+            "max_tokens": max_tokens,
         }
+        thinking_budget = _resolve_thinking_token_budget(
+            data,
+            max_tokens=max_tokens,
+        )
+        if thinking_budget is not None:
+            payload["thinking_token_budget"] = thinking_budget
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
         if "tools" in data:
@@ -837,18 +889,27 @@ class LocalModelProvider(ModelProvider):
         timeout: float,
     ) -> dict[str, Any]:
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
-        body = json.dumps(payload).encode("utf-8")
-        http_request = urllib.request.Request(
-            endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        with urllib.request.urlopen(http_request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+        attempts = _completion_attempts(payload)
+        for index, attempt in enumerate(attempts):
+            http_request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(attempt).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                response = urllib.request.urlopen(http_request, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                if index + 1 == len(attempts) or exc.code not in {400, 422}:
+                    raise
+                exc.close()
+                continue
+            with response:
+                return json.loads(response.read().decode("utf-8"))
+        raise AssertionError("completion attempts cannot be empty")
 
     def _post_tokenize(
         self,
@@ -901,12 +962,20 @@ class LocalModelProvider(ModelProvider):
         base_url = _resolve_base_url(data)
         _ensure_local_endpoint(base_url)
         timeout = _resolve_timeout(data)
+        model = _resolve_model(data)
+        max_tokens = _resolve_max_tokens(data)
         payload: dict[str, Any] = {
-            "model": _resolve_model(data),
+            "model": model,
             "messages": plan["messages"],
             "stream": True,
-            "max_tokens": _resolve_max_tokens(data),
+            "max_tokens": max_tokens,
         }
+        thinking_budget = _resolve_thinking_token_budget(
+            data,
+            max_tokens=max_tokens,
+        )
+        if thinking_budget is not None:
+            payload["thinking_token_budget"] = thinking_budget
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
         api_key = os.getenv("CORAX_LLM_API_KEY") or DEFAULT_LOCAL_API_KEY
@@ -962,13 +1031,21 @@ class LocalModelProvider(ModelProvider):
         base_url = _resolve_base_url(data)
         _ensure_local_endpoint(base_url)
         timeout = _resolve_timeout(data)
+        model = _resolve_model(data)
+        max_tokens = _resolve_max_tokens(data)
         payload: dict[str, Any] = {
-            "model": _resolve_model(data),
+            "model": model,
             "messages": plan["messages"],
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_tokens": _resolve_max_tokens(data),
+            "max_tokens": max_tokens,
         }
+        thinking_budget = _resolve_thinking_token_budget(
+            data,
+            max_tokens=max_tokens,
+        )
+        if thinking_budget is not None:
+            payload["thinking_token_budget"] = thinking_budget
         if "temperature" in data:
             payload["temperature"] = data["temperature"]
         if "tools" in data:
@@ -1033,19 +1110,28 @@ class LocalModelProvider(ModelProvider):
         timeout: float,
     ) -> Iterator[str]:
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
-        body = json.dumps(payload).encode("utf-8")
-        http_request = urllib.request.Request(
-            endpoint,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-        )
-        with urllib.request.urlopen(http_request, timeout=timeout) as response:
-            yield from _iter_sse_content(response)
+        attempts = _completion_attempts(payload)
+        for index, attempt in enumerate(attempts):
+            http_request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(attempt).encode("utf-8"),
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+            )
+            try:
+                response = urllib.request.urlopen(http_request, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                if index + 1 == len(attempts) or exc.code not in {400, 422}:
+                    raise
+                exc.close()
+                continue
+            with response as stream:
+                yield from _iter_sse_content(stream)
+            return
 
     def _post_chat_completion_stream_events(
         self,
@@ -1056,9 +1142,7 @@ class LocalModelProvider(ModelProvider):
         timeout: float,
     ) -> Iterator[dict[str, Any]]:
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
-        fallback = dict(payload)
-        fallback.pop("stream_options", None)
-        attempts = (payload, fallback) if fallback != payload else (payload,)
+        attempts = _completion_attempts(payload)
         for index, attempt in enumerate(attempts):
             body = json.dumps(attempt).encode("utf-8")
             http_request = urllib.request.Request(
@@ -1074,7 +1158,7 @@ class LocalModelProvider(ModelProvider):
             try:
                 response = urllib.request.urlopen(http_request, timeout=timeout)
             except urllib.error.HTTPError as exc:
-                if len(attempts) == 1 or index or exc.code not in {400, 422}:
+                if index + 1 == len(attempts) or exc.code not in {400, 422}:
                     raise
                 exc.close()
                 continue
